@@ -120,6 +120,7 @@ enum mining_algo {
     ALGO_BLAKE,       /* Blake */
     ALGO_X11,         /* X11 */
     ALGO_CRYPTONIGHT, /* CryptoNight */
+    ALGO_CRYPTONIGHT_MONERO, /* CryptoNight with Monero tweaks */
 };
 
 static const char *algo_names[] = {
@@ -133,6 +134,7 @@ static const char *algo_names[] = {
     [ALGO_BLAKE] =       "blake",
     [ALGO_X11] =         "x11",
     [ALGO_CRYPTONIGHT] = "cryptonight",
+    [ALGO_CRYPTONIGHT_MONERO] = "cryptonight-monero",
 };
 
 bool opt_debug = false;
@@ -155,7 +157,7 @@ int opt_timeout = 0;
 static int opt_scantime = 5;
 static json_t *opt_config;
 static const bool opt_time = true;
-static enum mining_algo opt_algo = ALGO_CRYPTONIGHT;
+static enum mining_algo opt_algo = ALGO_CRYPTONIGHT_MONERO;
 static int opt_n_threads;
 static int num_processors;
 static char *rpc_url;
@@ -545,6 +547,7 @@ static void share_result(int result, struct work *work, const char *reason) {
 
     switch (opt_algo) {
     case ALGO_CRYPTONIGHT:
+    case ALGO_CRYPTONIGHT_MONERO:
         applog(LOG_INFO, "accepted: %lu/%lu (%.2f%%), %.2f H/s at diff %g %s",
                 accepted_count, accepted_count + rejected_count,
                 100. * accepted_count / (accepted_count + rejected_count), hashrate,
@@ -571,6 +574,7 @@ static bool submit_upstream_work(CURL *curl, struct work *work) {
     char s[BIG_BUF_LEN];
     int i;
     bool rc = false;
+    bool is_monero = opt_algo == ALGO_CRYPTONIGHT_MONERO;
 
     /* pass if the previous hash is not the current previous hash */
     if (!submit_old && memcmp(work->data + 1, g_work.data + 1, 32)) {
@@ -582,14 +586,20 @@ static bool submit_upstream_work(CURL *curl, struct work *work) {
     if (have_stratum) {
         uint32_t ntime, nonce;
         char *ntimestr, *noncestr, *xnonce2str;
+        int variant;
 
         if (jsonrpc_2) {
+            variant = is_monero && ((const unsigned char*)work->data)[0] >= 7 ? ((const unsigned char*)work->data)[0] - 6 : 0;
             noncestr = bin2hex(((const unsigned char*)work->data) + 39, 4);
             char hash[32];
             switch(opt_algo) {
             case ALGO_CRYPTONIGHT:
+            case ALGO_CRYPTONIGHT_MONERO:
             default:
-                cryptonight_hash(hash, work->data, work->dlen);
+                if (!cryptonight_hash(hash, work->data, work->dlen, variant)) {
+                    applog(LOG_ERR, "submit_upstream_work cryptonight_hash failed");
+                    goto out;
+                }
             }
             char *hashhex = bin2hex(hash, 32);
             snprintf(s, JSON_BUF_LEN,
@@ -615,6 +625,7 @@ static bool submit_upstream_work(CURL *curl, struct work *work) {
             goto out;
         }
     } else if (have_daemon) {
+        int variant = is_monero && ((const unsigned char*)work->data)[0] >= 7 ? ((const unsigned char*)work->data)[0] - 6 : 0;
         char *noncestr;
         time_t work_time;
         pthread_mutex_lock(&g_work_lock);
@@ -654,12 +665,17 @@ static bool submit_upstream_work(CURL *curl, struct work *work) {
     } else {
         /* build JSON-RPC request */
         if(jsonrpc_2) {
+            int variant = is_monero && ((const unsigned char*)work->data)[0] >= 7 ? ((const unsigned char*)work->data)[0] - 6 : 0;
             char *noncestr = bin2hex(((const unsigned char*)work->data) + 39, 4);
             char hash[32];
             switch(opt_algo) {
             case ALGO_CRYPTONIGHT:
+            case ALGO_CRYPTONIGHT_MONERO:
             default:
-                cryptonight_hash(hash, work->data, work->dlen);
+                if (!cryptonight_hash(hash, work->data, work->dlen, variant)) {
+                    applog(LOG_ERR, "submit_upstream_work cryptonight_hash failed");
+                    goto out;
+                }
             }
             char *hashhex = bin2hex(hash, 32);
             snprintf(s, JSON_BUF_LEN,
@@ -1090,7 +1106,7 @@ static void *miner_thread(void *userdata) {
     }*/
     
 	persistentctx = persistentctxs[thr_id];
-	if(!persistentctx && opt_algo == ALGO_CRYPTONIGHT)
+	if(!persistentctx && (opt_algo == ALGO_CRYPTONIGHT || opt_algo == ALGO_CRYPTONIGHT_MONERO))
 	{
 		#if defined __unix__ && (!defined __APPLE__) && (!defined DISABLE_LINUX_HUGEPAGES)
 		persistentctx = (struct cryptonight_ctx *)mmap(0, sizeof(struct cryptonight_ctx), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE, 0, 0);
@@ -1167,7 +1183,7 @@ static void *miner_thread(void *userdata) {
                 max64 = 0xfffLL;
                 break;
             case ALGO_CRYPTONIGHT:
-
+            case ALGO_CRYPTONIGHT_MONERO:
                 max64 = 0x40LL;
                 break;
             default:
@@ -1199,6 +1215,7 @@ static void *miner_thread(void *userdata) {
         /*if (!opt_quiet) {
             switch(opt_algo) {
             case ALGO_CRYPTONIGHT:
+            case ALGO_CRYPTONIGHT_MONERO:
                 applog(LOG_INFO, "thread %d: %lu hashes, %.2f H/s", thr_id,
                         hashes_done, thr_hashrates[thr_id]);
                 break;
@@ -1217,6 +1234,7 @@ static void *miner_thread(void *userdata) {
             if (i == opt_n_threads) {
                 switch(opt_algo) {
                 case ALGO_CRYPTONIGHT:
+                case ALGO_CRYPTONIGHT_MONERO:
                     applog(LOG_INFO, "Total: %s H/s", hashrate);
                     break;
                 default:
@@ -1887,7 +1905,7 @@ static void signal_handler(int sig) {
     case SIGINT:
         applog(LOG_INFO, "SIGINT received, exiting");
         #if defined __unix__ && (!defined __APPLE__)
-		if(opt_algo == ALGO_CRYPTONIGHT)
+		if(opt_algo == ALGO_CRYPTONIGHT || opt_algo == ALGO_CRYPTONIGHT_MONERO)
 			for(i = 0; i < opt_n_threads; i++) munmap(persistentctxs[i], sizeof(struct cryptonight_ctx));
 		#endif
         exit(0);
@@ -1895,7 +1913,7 @@ static void signal_handler(int sig) {
     case SIGTERM:
         applog(LOG_INFO, "SIGTERM received, exiting");
         #if defined __unix__ && (!defined __APPLE__)
-		if(opt_algo == ALGO_CRYPTONIGHT)
+		if(opt_algo == ALGO_CRYPTONIGHT || opt_algo == ALGO_CRYPTONIGHT_MONERO)
 			for(i = 0; i < opt_n_threads; i++) munmap(persistentctxs[i], sizeof(struct cryptonight_ctx));
 		#endif
         exit(0);
@@ -2115,7 +2133,7 @@ int main(int argc, char *argv[]) {
 
     applog(LOG_INFO, "workio thread dead, exiting.");
 	#if defined __unix__ && (!defined __APPLE__)
-	if(opt_algo == ALGO_CRYPTONIGHT)
+	if(opt_algo == ALGO_CRYPTONIGHT || opt_algo == ALGO_CRYPTONIGHT_MONERO)
 		for(i = 0; i < opt_n_threads; i++) munmap(persistentctxs[i], sizeof(struct cryptonight_ctx));
 	#endif
     return 0;
