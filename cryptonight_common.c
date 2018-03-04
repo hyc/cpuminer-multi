@@ -41,14 +41,16 @@ void xor_blocks_dst(const uint8_t *restrict a, const uint8_t *restrict b, uint8_
 
 void (* const extra_hashes[4])(const void *, size_t, char *) = {do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash};
 
-void cryptonight_hash(void* output, const void* input, size_t len) {
+int cryptonight_hash(void* output, const void* input, size_t len, int variant) {
     struct cryptonight_ctx *ctx = (struct cryptonight_ctx*)malloc(sizeof(struct cryptonight_ctx));
-    cryptonight_hash_ctx(output, input, len, ctx);
+    int rc = cryptonight_hash_ctx(output, input, len, ctx, variant);
     free(ctx);
+    return rc;
 }
 
 int scanhash_cryptonight(int thr_id, uint32_t *restrict pdata, int dlen, const uint32_t *restrict ptarget, uint32_t max_nonce, unsigned long *restrict hashes_done, struct cryptonight_ctx *persistentctx) {
     uint32_t *nonceptr = (uint32_t*) (((char*)pdata) + 39);
+    int variant = ((const unsigned char*)pdata)[0] >= 7 ? ((const unsigned char*)pdata)[0] - 6 : 0;
     uint32_t n = *nonceptr - 1;
     const uint32_t first_nonce = n + 1;
     const uint64_t Htarg = ((const uint64_t *)ptarget)[3];
@@ -56,10 +58,11 @@ int scanhash_cryptonight(int thr_id, uint32_t *restrict pdata, int dlen, const u
 	
 	do {
 		*nonceptr = ++n;
-		cryptonight_hash_ctx(hash, pdata, dlen, persistentctx);
-		if (unlikely(hash[3] < Htarg)) {
-			*hashes_done = n - first_nonce + 1;
-			return true;
+		if (cryptonight_hash_ctx(hash, pdata, dlen, persistentctx, variant)) {
+			if (unlikely(hash[3] < Htarg)) {
+				*hashes_done = n - first_nonce + 1;
+				return true;
+			}
 		}
 	} while (likely((n <= max_nonce && !work_restart[thr_id].restart)));
     

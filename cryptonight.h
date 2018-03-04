@@ -60,9 +60,25 @@ void do_groestl_hash(const void* input, size_t len, char* output);
 void do_jh_hash(const void* input, size_t len, char* output);
 void do_skein_hash(const void* input, size_t len, char* output);
 void xor_blocks_dst(const uint8_t *restrict a, const uint8_t *restrict b, uint8_t *restrict dst);
-void cryptonight_hash_ctx(void* output, const void* input, int inlen, struct cryptonight_ctx* ctx);
+int cryptonight_hash_ctx(void* output, const void* input, int inlen, struct cryptonight_ctx* ctx, int variant);
 void keccak(const uint8_t *in, int inlen, uint8_t *md, int mdlen);
 void keccakf(uint64_t st[25], int rounds);
 extern void (* const extra_hashes[4])(const void *, size_t, char *);
+
+#define VARIANT1_1(p) \
+  do if (variant > 0) \
+  { \
+    const uint8_t tmp = ((const uint8_t*)(p))[11]; \
+    static const uint32_t table = 0x75310; \
+    const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1; \
+    ((uint8_t*)(p))[11] = tmp ^ ((table >> index) & 0x30); \
+  } while(0)
+
+#define VARIANT1_INIT() \
+  if (variant > 0 && inlen < 43) \
+  { \
+    return 0; \
+  } \
+  const uint64_t tweak1_2 = variant > 0 ? *((const uint64_t*) (((const uint8_t*)input) + 35)) ^ ctx->state.hs.w[24] : 0
 
 #endif
