@@ -134,7 +134,11 @@ int cryptonight_hash_ctx(void *restrict output, const void *restrict input, int 
 	    ctx->b[i] = ((uint64_t *)ctx->state.k)[i+2] ^  ((uint64_t *)ctx->state.k)[i+6];
     }
 
-	__m128i b_x = _mm_load_si128((__m128i *)ctx->b);
+    VARIANT2_INIT64(ctx->b, ctx->state);
+
+    __m128i b_x = _mm_load_si128((__m128i *)ctx->b);
+    __m128i b_x1 = _mm_load_si128((__m128i *)&ctx->b[2]);
+
     uint64_t a[2] __attribute((aligned(16))), b[2] __attribute((aligned(16)));
     a[0] = ctx->a[0];
     a[1] = ctx->a[1];
@@ -145,12 +149,12 @@ int cryptonight_hash_ctx(void *restrict output, const void *restrict input, int 
 	__m128i a_x = _mm_load_si128((__m128i *)a);
 	uint64_t c[2];
 	c_x = _mm_aesenc_si128(c_x, a_x);
+	VARIANT2_SHUFFLE_ADD_SSE2(ctx->long_state, a[0] & 0x1FFFF0);
 
 	_mm_store_si128((__m128i *)c, c_x);
 	__builtin_prefetch(&ctx->long_state[c[0] & 0x1FFFF0], 0, 1);
 	
-	b_x = _mm_xor_si128(b_x, c_x);
-	_mm_store_si128((__m128i *)&ctx->long_state[a[0] & 0x1FFFF0], b_x);
+	_mm_store_si128((__m128i *)&ctx->long_state[a[0] & 0x1FFFF0], _mm_xor_si128(b_x, c_x));
 
         VARIANT1_1(&ctx->long_state[a[0] & 0x1FFFF0]);
 
@@ -158,9 +162,10 @@ int cryptonight_hash_ctx(void *restrict output, const void *restrict input, int 
 	uint64_t b[2];
 	b[0] = nextblock[0];
 	b[1] = nextblock[1];
+	VARIANT2_INTEGER_MATH_SSE2(b, c);
 
+	uint64_t hi, lo;
 	{
-	  uint64_t hi, lo;
 	 // hi,lo = 64bit x 64bit multiply of c[0] and b[0]
 
 	  __asm__("mulq %3\n\t"
@@ -170,15 +175,19 @@ int cryptonight_hash_ctx(void *restrict output, const void *restrict input, int 
 		"rm" (b[0])
 		  : "cc" );
 	  
-	  a[0] += hi;
-	  a[1] += lo;
 	}
+	VARIANT2_2(ctx->long_state, c[0] & 0x1FFFF0);
+	VARIANT2_SHUFFLE_ADD_SSE2(ctx->long_state, c[0] & 0x1FFFF0);
+	a[0] += hi;
+	a[1] += lo;
+
 	uint64_t *dst = &ctx->long_state[c[0] & 0x1FFFF0];
 	dst[0] = a[0];
-	dst[1] = variant > 0 ? a[1] ^ tweak1_2 : a[1];
+	dst[1] = variant == 1 ? a[1] ^ tweak1_2 : a[1];
 
 	a[0] ^= b[0];
 	a[1] ^= b[1];
+	b_x1 = b_x;
 	b_x = c_x;
 	__builtin_prefetch(&ctx->long_state[a[0] & 0x1FFFF0], 0, 3);
 	}
