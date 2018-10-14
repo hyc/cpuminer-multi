@@ -189,17 +189,6 @@ static inline uint64_t mul128(uint64_t multiplier, uint64_t multiplicand, uint64
   return product_lo;
 }
 
-static inline void mul_sum_xor_dst(const uint8_t *a, uint8_t *c, uint8_t *dst, int variant, const uint64_t tweak1_2)
-{
-    uint64_t hi, lo = mul128(((uint64_t *)a)[0], ((uint64_t *)dst)[0], &hi) + ((uint64_t *)c)[1];
-	hi += ((uint64_t *)c)[0];
-	
-    ((uint64_t *)c)[0] = ((uint64_t*) dst)[0] ^ hi;
-    ((uint64_t *)c)[1] = ((uint64_t*) dst)[1] ^ lo;
-    ((uint64_t *)dst)[0] = hi;
-    ((uint64_t *)dst)[1] = variant > 0 ? lo ^ tweak1_2 : lo;
-}
-
 static inline void xor_blocks(uint8_t *restrict a, const uint8_t *restrict b) {
     ((uint64_t*) a)[0] ^= ((uint64_t*) b)[0];
     ((uint64_t*) a)[1] ^= ((uint64_t*) b)[1];
@@ -239,26 +228,43 @@ int cryptonight_hash_ctx(void *restrict output, const void *restrict input, int 
 	    ((uint64_t *)(ctx->b))[i] = ((uint64_t *)ctx->state.k)[i+2] ^  ((uint64_t *)ctx->state.k)[i+6];
     }
 	
+    VARIANT2_INIT64(ctx->b, ctx->state);
+
     //xor_blocks_dst(&ctx->state.k[0], &ctx->state.k[32], ctx->a);
     //xor_blocks_dst(&ctx->state.k[16], &ctx->state.k[48], ctx->b);
 
-    for (i = 0; likely(i < ITER / 4); ++i) {
+    for (i = 0; likely(i < ITER / 2); ++i) {
         // Dependency chain: address -> read value ------+
         // written value <-+ hard function (AES or MUL) <+
         // next address  <-+
         //
         // Iteration 1 
         SubAndShiftAndMixAddRound(ctx->c, &ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0], ctx->a);
+        VARIANT2_PORTABLE_SHUFFLE_ADD(ctx->long_state, ((uint64_t *)(ctx->a))[0] & 0x1FFFF0, ctx->a, ctx->b);
         xor_blocks_dst(ctx->c, ctx->b, &ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0]);
        VARIANT1_1(&ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0]);
         // Iteration 2 
-        mul_sum_xor_dst(ctx->c, ctx->a, &ctx->long_state[((uint64_t *)(ctx->c))[0] & 0x1FFFF0], variant, tweak1_2);
-        // Iteration 3 
-        SubAndShiftAndMixAddRound(ctx->b, &ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0], ctx->a);
-        xor_blocks_dst(ctx->b, ctx->c, &ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0]);
-       VARIANT1_1(&ctx->long_state[((uint64_t *)(ctx->a))[0] & 0x1FFFF0]);
-        // Iteration 4 
-        mul_sum_xor_dst(ctx->b, ctx->a, &ctx->long_state[((uint64_t *)(ctx->b))[0] & 0x1FFFF0], variant, tweak1_2);
+        {
+            uint64_t b[2];
+            b[0] = ((uint64_t*)&ctx->long_state[((uint64_t *)(ctx->c))[0] & 0x1FFFF0])[0];
+            b[1] = ((uint64_t*)&ctx->long_state[((uint64_t *)(ctx->c))[0] & 0x1FFFF0])[1];
+            VARIANT2_INTEGER_MATH_SSE2(b, ctx->c);
+
+            uint64_t hi, lo;
+            lo = mul128(((uint64_t *)ctx->c)[0], b[0], &hi);
+            VARIANT2_2(ctx->long_state, ((uint64_t *)(ctx->c))[0] & 0x1FFFF0);
+            VARIANT2_PORTABLE_SHUFFLE_ADD(ctx->long_state, ((uint64_t *)(ctx->c))[0] & 0x1FFFF0, ctx->a, ctx->b);
+
+            hi += ((uint64_t *)ctx->a)[0];
+            lo += ((uint64_t *)ctx->a)[1];
+
+            ((uint64_t *)ctx->a)[0] = b[0] ^ hi;
+            ((uint64_t *)ctx->a)[1] = b[1] ^ lo;
+            ((uint64_t*)&ctx->long_state[((uint64_t *)(ctx->c))[0] & 0x1FFFF0])[0] = hi;
+            ((uint64_t*)&ctx->long_state[((uint64_t *)(ctx->c))[0] & 0x1FFFF0])[1] = variant == 1 ? lo ^ tweak1_2 : lo;
+        }
+        memcpy(ctx->b + AES_BLOCK_SIZE, ctx->b, AES_BLOCK_SIZE);
+        memcpy(ctx->b, ctx->c, AES_BLOCK_SIZE);
     }
 
     memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);

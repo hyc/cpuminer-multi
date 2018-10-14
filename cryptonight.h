@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include "crypto/oaes_lib.h"
 #include "miner.h"
+#include "variant2_int_sqrt.h"
 
 #define MEMORY         (1 << 21) /* 2 MiB */
 #define ITER           (1 << 20)
@@ -36,7 +37,7 @@ struct cryptonight_ctx {
     union cn_slow_hash_state state;
     uint8_t text[INIT_SIZE_BYTE] __attribute((aligned(16)));
     uint8_t a[AES_BLOCK_SIZE] __attribute__((aligned(16)));
-    uint8_t b[AES_BLOCK_SIZE] __attribute__((aligned(16)));
+    uint8_t b[AES_BLOCK_SIZE * 2] __attribute__((aligned(16)));
     uint8_t c[AES_BLOCK_SIZE] __attribute__((aligned(16)));
     oaes_ctx* aes_ctx;
 };
@@ -48,7 +49,7 @@ struct cryptonight_ctx {
     union cn_slow_hash_state state;
     uint8_t text[INIT_SIZE_BYTE] __attribute((aligned(16)));
     uint64_t a[AES_BLOCK_SIZE >> 3] __attribute__((aligned(16)));
-    uint64_t b[AES_BLOCK_SIZE >> 3] __attribute__((aligned(16)));
+    uint64_t b[AES_BLOCK_SIZE >> 2] __attribute__((aligned(16)));
     uint8_t c[AES_BLOCK_SIZE] __attribute__((aligned(16)));
     oaes_ctx* aes_ctx;
 };
@@ -66,7 +67,7 @@ void keccakf(uint64_t st[25], int rounds);
 extern void (* const extra_hashes[4])(const void *, size_t, char *);
 
 #define VARIANT1_1(p) \
-  do if (variant > 0) \
+  do if (variant == 1) \
   { \
     const uint8_t tmp = ((const uint8_t*)(p))[11]; \
     static const uint32_t table = 0x75310; \
@@ -75,10 +76,84 @@ extern void (* const extra_hashes[4])(const void *, size_t, char *);
   } while(0)
 
 #define VARIANT1_INIT() \
-  if (variant > 0 && inlen < 43) \
+  if (variant == 1 && inlen < 43) \
   { \
     return 0; \
   } \
-  const uint64_t tweak1_2 = variant > 0 ? *((const uint64_t*) (((const uint8_t*)input) + 35)) ^ ctx->state.hs.w[24] : 0
+  const uint64_t tweak1_2 = variant == 1 ? *((const uint64_t*) (((const uint8_t*)input) + 35)) ^ ctx->state.hs.w[24] : 0
+
+#define VARIANT2_INIT64(b, state) \
+  uint64_t division_result = 0; \
+  uint64_t sqrt_result = 0; \
+  do if (variant >= 2) \
+  { \
+    ((uint64_t*)b)[2] = state.hs.w[8] ^ state.hs.w[10]; \
+    ((uint64_t*)b)[3] = state.hs.w[9] ^ state.hs.w[11]; \
+    division_result = state.hs.w[12]; \
+    sqrt_result = state.hs.w[13]; \
+  } while (0)
+
+#define VARIANT2_SHUFFLE_ADD_SSE2(base_ptr, offset) \
+  do if (variant >= 2) \
+  { \
+    const __m128i chunk1 = _mm_load_si128((__m128i *)((base_ptr) + ((offset) ^ 0x10))); \
+    const __m128i chunk2 = _mm_load_si128((__m128i *)((base_ptr) + ((offset) ^ 0x20))); \
+    const __m128i chunk3 = _mm_load_si128((__m128i *)((base_ptr) + ((offset) ^ 0x30))); \
+    _mm_store_si128((__m128i *)((base_ptr) + ((offset) ^ 0x10)), _mm_add_epi64(chunk3, b_x1)); \
+    _mm_store_si128((__m128i *)((base_ptr) + ((offset) ^ 0x20)), _mm_add_epi64(chunk1, b_x)); \
+    _mm_store_si128((__m128i *)((base_ptr) + ((offset) ^ 0x30)), _mm_add_epi64(chunk2, a_x)); \
+  } while (0)
+
+#define VARIANT2_PORTABLE_SHUFFLE_ADD(base_ptr, offset, a, b) \
+  do if (variant >= 2) \
+  { \
+    uint64_t* chunk1 = (uint64_t*)((base_ptr) + ((offset) ^ 0x10)); \
+    uint64_t* chunk2 = (uint64_t*)((base_ptr) + ((offset) ^ 0x20)); \
+    uint64_t* chunk3 = (uint64_t*)((base_ptr) + ((offset) ^ 0x30)); \
+    \
+    const uint64_t chunk1_old[2] = { chunk1[0], chunk1[1] }; \
+    \
+    uint64_t b1[2]; \
+    memcpy(b1, b + 16, 16); \
+    chunk1[0] = chunk3[0] + b1[0]; \
+    chunk1[1] = chunk3[1] + b1[1]; \
+    \
+    uint64_t a0[2]; \
+    memcpy(a0, a, 16); \
+    chunk3[0] = chunk2[0] + a0[0]; \
+    chunk3[1] = chunk2[1] + a0[1]; \
+    \
+    uint64_t b0[2]; \
+    memcpy(b0, b, 16); \
+    chunk2[0] = chunk1_old[0] + b0[0]; \
+    chunk2[1] = chunk1_old[1] + b0[1]; \
+  } while (0)
+
+#define VARIANT2_INTEGER_MATH_DIVISION_STEP(b, ptr) \
+  ((uint64_t*)(b))[0] ^= division_result ^ (sqrt_result << 32); \
+  { \
+    const uint64_t dividend = ((uint64_t*)(ptr))[1]; \
+    const uint32_t divisor = (((uint64_t*)(ptr))[0] + (uint32_t)(sqrt_result << 1)) | 0x80000001UL; \
+    division_result = ((uint32_t)(dividend / divisor)) + \
+                     (((uint64_t)(dividend % divisor)) << 32); \
+  } \
+  const uint64_t sqrt_input = ((uint64_t*)(ptr))[0] + division_result
+
+#define VARIANT2_INTEGER_MATH_SSE2(b, ptr) \
+  do if (variant >= 2) \
+  { \
+    VARIANT2_INTEGER_MATH_DIVISION_STEP(b, ptr); \
+    VARIANT2_INTEGER_MATH_SQRT_STEP_SSE2(); \
+    VARIANT2_INTEGER_MATH_SQRT_FIXUP(sqrt_result); \
+  } while(0)
+
+#define VARIANT2_2(hp_state, j) \
+  do if (variant >= 2) \
+  { \
+    *(uint64_t*)(hp_state + (j ^ 0x10)) ^= hi; \
+    *((uint64_t*)(hp_state + (j ^ 0x10)) + 1) ^= lo; \
+    hi ^= *(uint64_t*)(hp_state + (j ^ 0x20)); \
+    lo ^= *((uint64_t*)(hp_state + (j ^ 0x20)) + 1); \
+  } while (0)
 
 #endif
