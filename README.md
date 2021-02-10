@@ -1,3 +1,15 @@
+THIS CODE IS OSBOLETE AND NO LONGER MAINTAINED.
+==============
+
+DO NOT USE.
+===========
+
+
+
+
+
+
+
 CPUMiner-Multi
 ==============
 
